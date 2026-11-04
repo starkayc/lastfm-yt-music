@@ -31,6 +31,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Determine release version
+        id: ver
+        run: |
+          set -euo pipefail
+          git fetch --tags || true
+          TAG_PREFIX="v1.0."
+          LAST_NUM="$(git tag -l "${TAG_PREFIX}*" | sed "s/${TAG_PREFIX}//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+          if [ -z "$LAST_NUM" ]; then
+            BUILD_NUM=1
+          else
+            BUILD_NUM=$((LAST_NUM + 1))
+          fi
+          VERSION="1.0.${BUILD_NUM}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: $VERSION"
+
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -49,6 +66,7 @@ jobs:
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           SIDELOAD_FIXES_INPUT: ${{ inputs.sideload_fixes }}
+          PACKAGE_VERSION: ${{ steps.ver.outputs.VERSION }}
         run: |
           set -euo pipefail
           if [ -z "${LASTFM_API_KEY:-}" ] || [ -z "${LASTFM_API_SECRET:-}" ]; then
@@ -61,7 +79,9 @@ jobs:
             SIDELOAD_ARG=1
           fi
 
-          make clean package FINALPACKAGE=1 SIDELOAD_FIXES="$SIDELOAD_ARG"
+          make clean package FINALPACKAGE=1 \
+            PACKAGE_VERSION="$PACKAGE_VERSION" \
+            SIDELOAD_FIXES="$SIDELOAD_ARG"
 
           mkdir -p release_files
           cp packages/*.deb release_files/
@@ -70,33 +90,18 @@ jobs:
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: YTMLastFM-deb
+          name: YTMLastFM-${{ steps.ver.outputs.VERSION }}-deb
           path: release_files/*.deb
           if-no-files-found: error
-
-      - name: Determine release build number
-        id: buildnum
-        if: github.event_name == 'push' || inputs.create_release == true
-        run: |
-          set -euo pipefail
-          git fetch --tags || true
-          TAG_PREFIX="v1.0."
-          LAST_NUM="$(git tag -l "${TAG_PREFIX}*" | sed "s/${TAG_PREFIX}//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
-          if [ -z "$LAST_NUM" ]; then
-            BUILD_NUM=1
-          else
-            BUILD_NUM=$((LAST_NUM + 1))
-          fi
-          echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         if: github.event_name == 'push' || inputs.create_release == true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
-          name: "YTMLastFM v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
+          tag_name: ${{ steps.ver.outputs.TAG }}
+          name: "YTMLastFM ${{ steps.ver.outputs.TAG }}"
           body: |
-            Rootless `.deb` build of Last.fm for YouTube Music iOS.
+            Rootless `.deb` build of YTMusic Last.fm (`${{ steps.ver.outputs.VERSION }}`) for YouTube Music iOS.
           files: release_files/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,6 +2,7 @@ THEOS_PACKAGE_SCHEME = rootless
 ARCHS := arm64 arm64e
 TARGET := iphone:clang:latest:14.0
 INSTALL_TARGET_PROCESSES = YouTubeMusic
+PACKAGE_VERSION ?= 1.0.3
 
 include $(THEOS)/makefiles/common.mk
 
@@ -21,7 +22,7 @@ ifeq ($(SIDELOAD_FIXES),1)
 $(TWEAK_NAME)_FILES += optional/Sideload.x
 endif
 
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Iheaders -DAPI_KEY=@\"$(LASTFM_API_KEY)\" -DAPI_SECRET=@\"$(LASTFM_API_SECRET)\"
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Iheaders -DTWEAK_VERSION=@\"$(PACKAGE_VERSION)\" -DAPI_KEY=@\"$(LASTFM_API_KEY)\" -DAPI_SECRET=@\"$(LASTFM_API_SECRET)\"
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation MediaPlayer SafariServices Security CydiaSubstrate
 
 include $(THEOS_MAKE_PATH)/tweak.mk
