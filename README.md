@@ -1,33 +1,62 @@
+<div align="center">
+  <h3>Last.fm for YouTube Music (iOS)</h3>
+  <p>Last.fm Now Playing and Scrobbling tweak for the YouTube Music iOS app.</p>
+</div>
+
 ---
 
-<div align="center">
-  <h3>🎶 Last.fm for YouTube Music </h3>
-  <p>Last.fm integration for the YouTube Music iOS app.</p>
-</div>
+## Overview
+
+- **Companion-mode by default:** `Sideload.x` is excluded from the default build so the tweak can be injected alongside **YTMusicUltimate** without double-hooking keychain/bundle-ID selectors or crashing on launch.
+- **Guarded player state polling:** Reads `contentVideoID`, `currentVideoMediaTime`, and `currentVideoTotalMediaTime` from `YTPlayerViewController` using selector-checked KVC and `MLHAMPlayerItem` state hooks.
+- **Dual metadata resolution:** Reads track, artist, album, and duration from `MPNowPlayingInfoCenter` first (supporting featured artists and user-uploaded library tracks), falling back to YouTube's oEmbed API. Includes an in-app toggle to prefer oEmbed (`Accept-Language: en-US`) for unlocalized titles.
+- **Last.fm API spec compliance:**
+  - Tracks must be **> 30 seconds** and played for at least **min(50% duration, 240 seconds)** of accumulated play time (pauses and forward seeks do not count).
+  - Persistent offline scrobble queue (`NSDocumentDirectory/lfm_scrobble_queue.plist`) flushes in batches of up to 50 oldest-first and drops entries older than 14 days.
+  - All network requests run asynchronously on a serial background queue (`com.lfm.net`).
+- **In-app Settings UI:** Accessible from the YouTube Music account menu (`Last.fm Scrobbler`).
 
 ---
 
 ## Requirements
 
-- Jailbroken iOS device, or one with sideloading capabilities
-- Last.fm API key
-- [Theos](https://theos.dev)
+- Last.fm API key & shared secret (<https://www.last.fm/api/account/create>, callback URL `http://localhost:3000`)
+- [Theos](https://theos.dev) (for local builds) or GitHub Actions with repository secrets
+
+---
 
 ## Building
 
-1. Navigate to <https://last.fm/api/account/create>
-2. Fill in the following:
-    - Contact email: Your email
-    - Application name: (Anything)
-    - Callback URL: `http://localhost:3000`
-3. Fill in `MakeFile`:
-    - `LASTFM_API_KEY`: API key from the previous step
-    - `LASTFM_API_SECRET`: API secret from the previous step
-4. Build with `make clean package FINALPACKAGE=1`
-    > If you get `Makefile:8: /makefiles/common.mk: No such file or directory`, you do not have Theos installed. [Install Theos](https://theos.dev/docs/installation)
+### Local Build (Companion Mode — Default)
 
-The resulting `.deb` tweak file will be in `packages/`.
+```bash
+make clean package FINALPACKAGE=1 \
+  LASTFM_API_KEY=your_api_key \
+  LASTFM_API_SECRET=your_api_secret
+```
+
+The resulting rootless `.deb` is written to `packages/`.
+
+### Standalone Sideload Mode (Optional)
+
+Only use when injecting **without** YTMusicUltimate:
+
+```bash
+make clean package FINALPACKAGE=1 \
+  SIDELOAD_FIXES=1 \
+  LASTFM_API_KEY=your_api_key \
+  LASTFM_API_SECRET=your_api_secret
+```
+
+### GitHub Actions Build
+
+1. Add repository secrets under **Settings → Secrets and variables → Actions**:
+   - `LASTFM_API_KEY`
+   - `LASTFM_API_SECRET`
+2. Push to `main` or run **Build and Release Tweak** from the **Actions** tab to build the rootless `.deb` and publish a GitHub Release.
+
+---
 
 ## Licensing
 
-See [LICENSE](/LICENSE).
+GPL-3.0-or-later. See [LICENSE](/LICENSE).

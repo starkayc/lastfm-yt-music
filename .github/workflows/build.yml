@@ -1,0 +1,102 @@
+name: Build and Release Tweak
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sideload_fixes:
+        description: "Include standalone Sideload.x fixes (DO NOT enable with YTMusicUltimate)"
+        required: false
+        default: false
+        type: boolean
+      create_release:
+        description: "Create GitHub Release with built .deb"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          brew install ldid xz dpkg make
+
+      - name: Setup Theos & SDKs
+        run: |
+          set -euo pipefail
+          git clone --quiet --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          rm -rf "$THEOS/sdks"
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz | tar xz -C "$THEOS/sdks" --strip-components=1
+
+      - name: Build rootless .deb package
+        env:
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          SIDELOAD_FIXES_INPUT: ${{ inputs.sideload_fixes }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LASTFM_API_KEY:-}" ] || [ -z "${LASTFM_API_SECRET:-}" ]; then
+            echo "::error::Set LASTFM_API_KEY and LASTFM_API_SECRET in repository Actions secrets."
+            exit 1
+          fi
+
+          SIDELOAD_ARG=0
+          if [ "$SIDELOAD_FIXES_INPUT" = "true" ]; then
+            SIDELOAD_ARG=1
+          fi
+
+          make clean package FINALPACKAGE=1 SIDELOAD_FIXES="$SIDELOAD_ARG"
+
+          mkdir -p release_files
+          cp packages/*.deb release_files/
+          ls -lh release_files/
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LastFMYouTubeMusic-deb
+          path: release_files/*.deb
+          if-no-files-found: error
+
+      - name: Determine release build number
+        id: buildnum
+        if: github.event_name == 'push' || inputs.create_release == true
+        run: |
+          set -euo pipefail
+          git fetch --tags || true
+          TAG_PREFIX="v1.0."
+          LAST_NUM="$(git tag -l "${TAG_PREFIX}*" | sed "s/${TAG_PREFIX}//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+          if [ -z "$LAST_NUM" ]; then
+            BUILD_NUM=1
+          else
+            BUILD_NUM=$((LAST_NUM + 1))
+          fi
+          echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
+          name: "LastFMYouTubeMusic v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
+          body: |
+            Rootless `.deb` build of Last.fm for YouTube Music iOS.
+          files: release_files/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

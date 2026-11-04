@@ -1,15 +1,9 @@
-#import "Main.h"
-#import "./YouTube/YTQueueController.h"
+// GPL-3.0-or-later
+#import <Foundation/Foundation.h>
 #import "./YouTube/YTMContentViewController.h"
-
-
-static YTQueueController *g_ytQueueController;
-static YTMContentViewController *g_ytRootViewController;
 
 @interface LFMYouTubeInstances : NSObject
 
-+ (YTQueueController*) queueController;
-+ (YTMContentViewController*) rootViewController;
-
++ (YTMContentViewController *)rootViewController;
 
 @end

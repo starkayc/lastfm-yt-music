@@ -1,283 +1,596 @@
+// GPL-3.0-or-later
 #import "../headers/Client.h"
+#import "../headers/LFMCore.h"
+#import "../headers/Instances.h"
+#import "../headers/YouTube/YTAlertView.h"
 #import <SafariServices/SafariServices.h>
+#import <objc/runtime.h>
 
-static NSString* const LFMBaseURL = @"https://ws.audioscrobbler.com/2.0";
+static NSString *const LFMBaseURL = @"https://ws.audioscrobbler.com/2.0/";
+static NSString *const LFMSessionDefaultsKey = @"lfmSessionKey";
+static const NSTimeInterval LFMMaxScrobbleAgeSeconds = 14.0 * 86400.0;
+static const NSUInteger LFMMaxBatchSize = 50;
+static const NSUInteger LFMMaxQueueSize = 1000;
+
+static dispatch_queue_t LFMNetQueue(void) {
+    static dispatch_queue_t q = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        q = dispatch_queue_create("com.lfm.net", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static NSString *g_pendingAuthToken = nil;
+static BOOL g_authInFlight = NO;
+static BOOL g_autoAuthPromptedThisSession = NO;
+static BOOL g_apiKeyStopped = NO;
+static BOOL g_apiKeyAlertShown = NO;
+static BOOL g_flushInFlight = NO;
+static NSUInteger g_retryAttempt = 0;
+static NSTimeInterval g_nextRetryNotBefore = 0;
+static NSMutableArray<NSDictionary *> *g_scrobbleQueue = nil;
+
+static UIViewController *LFMTopViewController(void) {
+    UIViewController *root = [LFMYouTubeInstances rootViewController];
+    if (!root) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                    if (window.isKeyWindow && window.rootViewController) {
+                        root = window.rootViewController;
+                        break;
+                    }
+                }
+            }
+            if (root) break;
+        }
+    }
+    while (root.presentedViewController && !root.presentedViewController.isBeingDismissed) {
+        root = root.presentedViewController;
+    }
+    return root;
+}
+
+static void LFMShowAlertOnMain(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class ytAlertCls = objc_getClass("YTAlertView");
+        if (ytAlertCls && [ytAlertCls respondsToSelector:@selector(infoDialog)]) {
+            YTAlertView *alertView = [ytAlertCls infoDialog];
+            if ([alertView respondsToSelector:@selector(setTitle:)]) alertView.title = title;
+            if ([alertView respondsToSelector:@selector(setSubtitle:)]) alertView.subtitle = message;
+            if ([alertView respondsToSelector:@selector(show)]) {
+                [alertView show];
+                return;
+            }
+        }
+        UIViewController *top = LFMTopViewController();
+        if (top) {
+            UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                                        message:message
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [top presentViewController:ac animated:YES completion:nil];
+        }
+    });
+}
+
+static NSString *LFMQueueFilePath(void) {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docs = paths.firstObject ?: NSTemporaryDirectory();
+    return [docs stringByAppendingPathComponent:@"lfm_scrobble_queue.plist"];
+}
+
+static void LFMLoadQueueOnNetQueue(void) {
+    if (g_scrobbleQueue) return;
+    NSString *path = LFMQueueFilePath();
+    NSArray *saved = [NSArray arrayWithContentsOfFile:path];
+    if ([saved isKindOfClass:[NSArray class]]) {
+        g_scrobbleQueue = [saved mutableCopy];
+    } else {
+        g_scrobbleQueue = [NSMutableArray array];
+    }
+}
+
+static void LFMSaveQueueOnNetQueue(void) {
+    if (!g_scrobbleQueue) return;
+    [g_scrobbleQueue writeToFile:LFMQueueFilePath() atomically:YES];
+}
+
+static void LFMPruneExpiredOnNetQueue(void) {
+    LFMLoadQueueOnNetQueue();
+    int64_t cutoff = (int64_t)[[NSDate date] timeIntervalSince1970] - (int64_t)LFMMaxScrobbleAgeSeconds;
+    NSIndexSet *expired = [g_scrobbleQueue indexesOfObjectsPassingTest:^BOOL(NSDictionary *item, NSUInteger idx, BOOL *stop) {
+        int64_t ts = [item[@"timestamp"] longLongValue];
+        return ts <= 0 || ts < cutoff;
+    }];
+    if (expired.count > 0) {
+        NSLog(@"Dropping %lu expired scrobble(s) older than 14 days", (unsigned long)expired.count);
+        [g_scrobbleQueue removeObjectsAtIndexes:expired];
+        LFMSaveQueueOnNetQueue();
+    }
+}
 
 @implementation LFMClient
-	+ (NSString*) makeSignature:(NSDictionary<NSString*, NSString*>*)parameters secret:(NSString*)secret {
-		NSArray *sortedParamKeys = [[parameters allKeys] sortedArrayUsingSelector:@selector(compare:)];
-    NSMutableString *signature = [[NSMutableString alloc] init];
 
-		for (NSString *key in sortedParamKeys) {
-			if ([key isEqualToString:@"format"]) continue;
++ (NSString *)makeSignature:(NSDictionary<NSString *, id> *)parameters secret:(NSString *)secret {
+    return LFMMakeSignature(parameters, secret);
+}
 
-			NSString *str = [NSString stringWithFormat:@"%@%@", key, [parameters objectForKey:key]];
-			[signature appendString:str];
++ (NSString *)urlEncodedString:(NSString *)str {
+    return LFMFormEncodeString(LFMStringFromValue(str));
+}
+
++ (NSString *)md5:(NSString *)string {
+    return LFMMD5Hex(string);
+}
+
++ (BOOL)hasSession {
+    NSString *sk = [[NSUserDefaults standardUserDefaults] stringForKey:LFMSessionDefaultsKey];
+    return sk.length > 0;
+}
+
++ (void)clearSession {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:LFMSessionDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"lfmToken"];
+    dispatch_async(LFMNetQueue(), ^{
+        g_pendingAuthToken = nil;
+        g_authInFlight = NO;
+        g_autoAuthPromptedThisSession = NO;
+    });
+}
+
++ (NSUInteger)pendingScrobbleCount {
+    __block NSUInteger count = 0;
+    dispatch_sync(LFMNetQueue(), ^{
+        LFMPruneExpiredOnNetQueue();
+        count = g_scrobbleQueue.count;
+    });
+    return count;
+}
+
++ (void)postSignedParameters:(NSDictionary<NSString *, id> *)params
+                     timeout:(NSTimeInterval)timeout
+                  completion:(void (^)(NSDictionary *json, NSError *networkError))completion {
+    if (g_apiKeyStopped) {
+        if (completion) completion(nil, [NSError errorWithDomain:@"com.lfm.client" code:26 userInfo:nil]);
+        return;
     }
 
-    [signature appendString:secret];
+    NSMutableDictionary<NSString *, id> *fullParams = [NSMutableDictionary dictionaryWithDictionary:params];
+    fullParams[@"api_key"] = API_KEY;
+    fullParams[@"format"] = @"json";
+    fullParams[@"api_sig"] = LFMMakeSignature(fullParams, API_SECRET);
 
-    return [LFMClient md5:signature];
-	}
+    NSString *bodyString = LFMBuildFormEncodedString(fullParams);
+    NSData *bodyData = [bodyString dataUsingEncoding:NSUTF8StringEncoding];
 
-	+ (void) handleBrowserExit {
-		[LFMClient createSession];
-	}
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:LFMBaseURL]
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:timeout];
+    request.HTTPMethod = @"POST";
+    [request setValue:@"application/x-www-form-urlencoded; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+    request.HTTPBody = bodyData;
 
-	+ (void) setNowPlaying:(NSString*)track artist:(NSString*)artist duration:(double)duration {
-		[LFMClient postSongDataToAPI:@{
-			@"artist": artist,
-			@"track": track,
-			@"duration": [NSNumber numberWithDouble:duration],
-			@"album": @"",
-			@"album_artist": artist,
-			@"method": @"track.updateNowPlaying"
-		}];
-	}
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:request
+          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+              dispatch_async(LFMNetQueue(), ^{
+                  if (error || !data) {
+                      if (completion) completion(nil, error ?: [NSError errorWithDomain:@"com.lfm.client" code:-1 userInfo:nil]);
+                      return;
+                  }
+                  NSError *parseError = nil;
+                  NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+                  if (![json isKindOfClass:[NSDictionary class]]) {
+                      if (completion) completion(nil, parseError ?: [NSError errorWithDomain:@"com.lfm.client" code:-2 userInfo:nil]);
+                      return;
+                  }
+                  if (completion) completion(json, nil);
+              });
+          }];
+    [task resume];
+}
 
-	+ (void) scrobble:(NSString*)track artist:(NSString*)artist duration:(double)duration elapsed:(double)elapsed {
-		NSDate *date = [NSDate date];
-		NSTimeInterval unix = [date timeIntervalSince1970];
++ (void)handleAPIErrorCode:(NSInteger)errorCode message:(NSString *)message {
+    if (errorCode == 10 || errorCode == 26) {
+        g_apiKeyStopped = YES;
+        NSLog(@"Last.fm API key error (%ld): %@", (long)errorCode, message);
+        if (!g_apiKeyAlertShown) {
+            g_apiKeyAlertShown = YES;
+            LFMShowAlertOnMain(@"Last.fm Error", [NSString stringWithFormat:@"API key error (%ld): %@", (long)errorCode, message ?: @"Invalid or suspended API key"]);
+        }
+    } else if (errorCode == 9) {
+        NSLog(@"Last.fm session key invalid (error 9); clearing session and prompting re-auth once.");
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:LFMSessionDefaultsKey];
+        [self startAuthUserInitiated:NO];
+    } else {
+        NSLog(@"Last.fm API error (%ld): %@", (long)errorCode, message);
+    }
+}
 
-		double fixed = trunc((unix - elapsed));
++ (void)startAuthIfNeeded {
+    [self startAuthUserInitiated:NO];
+}
 
-		[LFMClient postSongDataToAPI:@{
-			@"artist": artist,
-			@"track": track,
-			@"duration": [NSNumber numberWithDouble:duration],
-			@"timestamp": [NSNumber numberWithDouble:fixed],
-			@"album": @"",
-			@"album_artist": artist,
-			@"method": @"track.scrobble"
-		}];
-	}
++ (void)startAuthUserInitiated:(BOOL)userInitiated {
+    dispatch_async(LFMNetQueue(), ^{
+        if (g_apiKeyStopped) return;
+        if (!userInitiated && [self hasSession]) return;
+        if (g_authInFlight) return;
+        if (!userInitiated && g_autoAuthPromptedThisSession) return;
 
-	+ (void) postSongDataToAPI:(NSDictionary*)data {
-		NSString *sessionKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"lfmSessionKey"];
-		NSMutableDictionary *postedData = [[NSMutableDictionary alloc] init];
+        g_authInFlight = YES;
+        if (!userInitiated) {
+            g_autoAuthPromptedThisSession = YES;
+        }
 
-		postedData[@"api_key"] = API_KEY;
-		postedData[@"sk"] = sessionKey ? sessionKey : @"invalid_key";
-		postedData[@"format"] = @"json";
+        // Remove any legacy persisted single-use token
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"lfmToken"];
 
-		for (id key in data) {
-			postedData[key] = data[key];
-		}
+        [self postSignedParameters:@{ @"method": @"auth.getToken" }
+                           timeout:15.0
+                        completion:^(NSDictionary *json, NSError *networkError) {
+                            if (networkError || !json) {
+                                g_authInFlight = NO;
+                                NSLog(@"Failed to fetch Last.fm auth token: %@", networkError);
+                                if (userInitiated) {
+                                    LFMShowAlertOnMain(@"Last.fm", @"Network error while requesting Last.fm token.");
+                                }
+                                return;
+                            }
+                            NSNumber *errObj = json[@"error"];
+                            if (errObj) {
+                                g_authInFlight = NO;
+                                [self handleAPIErrorCode:errObj.integerValue message:json[@"message"]];
+                                if (userInitiated) {
+                                    LFMShowAlertOnMain(@"Last.fm", [NSString stringWithFormat:@"Failed to get token: %@", json[@"message"] ?: errObj]);
+                                }
+                                return;
+                            }
+                            NSString *token = json[@"token"];
+                            if (![token isKindOfClass:[NSString class]] || token.length == 0) {
+                                g_authInFlight = NO;
+                                NSLog(@"Last.fm auth.getToken returned empty token: %@", json);
+                                return;
+                            }
+                            g_pendingAuthToken = [token copy];
+                            [self presentSafariAuthWithToken:token];
+                        }];
+    });
+}
 
-		postedData[@"api_sig"] = [LFMClient makeSignature:postedData secret:API_SECRET];
-
-		dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-		NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://ws.audioscrobbler.com/2.0/"]
-			cachePolicy:NSURLRequestUseProtocolCachePolicy
-			timeoutInterval:10.0
-		];
-
-		NSDictionary *headers = @{
-			@"Content-Type": @"application/x-www-form-urlencoded"
-		};
-
-		[request setAllHTTPHeaderFields:headers];
-
-		NSMutableData *body = [[NSMutableData alloc] initWithData:[@"format=json" dataUsingEncoding:NSUTF8StringEncoding]];
-
-		for (id key in postedData) {
-			[body appendData:[[NSString stringWithFormat:@"&%@=%@", key, [LFMClient urlEncodedString:postedData[key]]] dataUsingEncoding:NSUTF8StringEncoding]];
-		}
-
-		[request setHTTPBody:body];
-		[request setHTTPMethod:@"POST"];
-
-		NSURLSession *session = [NSURLSession sharedSession];
-		NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
-			completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-				if (error) {
-					NSLog(@"Error while posting data: %@", error);
-					dispatch_semaphore_signal(sema);
-				} else {
-					NSError *parseError = nil;
-					NSDictionary *responseDictionary = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
-					NSLog(@"Response: %@", responseDictionary);
-
-					id error = responseDictionary[@"error"];
-					if ([error isEqual:@9] || [error isEqual:@4]) {
-						[LFMClient createToken];
-					}
-
-					dispatch_semaphore_signal(sema);
-				}
-			}
-		];
-
-		[dataTask resume];
-		dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-	}
-
-	+ (NSString*) createToken {
-		NSString *signature = [LFMClient makeSignature:@{
-			@"format": @"json",
-			@"api_key": API_KEY,
-			@"method": @"auth.gettoken"
-		} secret:API_SECRET];
-
-		NSString *_url = [NSString stringWithFormat:@"%@/?method=auth.gettoken&api_key=%@&api_sig=%@&format=json", LFMBaseURL, API_KEY, signature];
-		NSURL *url = [NSURL URLWithString:_url];
-
-		NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:60];
-
-		dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-		__block NSURLResponse *response;
-		__block NSError *error;
-		__block NSData *data;
-
-		NSURLSession *session = [NSURLSession sharedSession];
-		NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
-			completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-				data = d;
-				response = r;
-				error = e;
-
-				dispatch_semaphore_signal(semaphore);
-			}
-		];
-
-		[dataTask resume];
-		dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-		if (error) {
-			NSLog(@"Faced error while creating token: %@", error);
-			return nil;
-		}
-
-		if (data) {
-			id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-
-			if (json[@"error"] && json[@"message"]) {
-				NSLog(@"Faced an error while getting token: %@", json[@"message"]);
-
-				YTAlertView *alertView = [%c(YTAlertView) infoDialog];
-				alertView.title = @"Warning";
-				alertView.subtitle = [NSString stringWithFormat: @"Failed to get last.fm token: %@", json[@"message"]];
-				[alertView show];
-
-				return nil;
-			}
-
-			[[NSUserDefaults standardUserDefaults] setObject:json[@"token"] forKey:@"lfmToken"];
-			NSLog(@"Token fetched: %@", json[@"token"]);
-
-			[LFMClient authorize];
-
-			return json[@"token"];
-		}
-
-		return nil;
-	}
-
-	+ (void) authorize {
-		NSString *token = [[NSUserDefaults standardUserDefaults] stringForKey:@"lfmToken"];
-		NSString *_url = [NSString stringWithFormat:@"https://www.last.fm/api/auth/?api_key=%@&token=%@", API_KEY, token];
-		NSURL *url = [NSURL URLWithString:_url];
-
-		dispatch_async(dispatch_get_main_queue(), ^{
-			SFSafariViewController *view = [[SFSafariViewController alloc] initWithURL:url];
-			YTMContentViewController *controller = [LFMYouTubeInstances rootViewController];
-			[view setModalPresentationStyle:UIModalPresentationFullScreen];
-
-			view.delegate = controller;
-
-			[controller presentViewController:view animated:YES completion:nil];
-		});
-	}
-
-	+ (NSString*) createSession {
-		NSString *cached = [[NSUserDefaults standardUserDefaults] stringForKey:@"lfmToken"];
-		NSString *token = cached ? cached : [LFMClient createToken];
-
-		NSLog(@"https://www.last.fm/api/auth/?api_key=%@&token=%@", API_KEY, token);
-
-		NSString *signature = [LFMClient makeSignature:@{
-			@"format": @"json",
-			@"api_key": API_KEY,
-			@"token": token,
-			@"method": @"auth.getsession"
-		} secret:API_SECRET];
-
-		NSString *_url = [NSString stringWithFormat:@"%@/?method=auth.getsession&api_key=%@&api_sig=%@&token=%@&format=json", LFMBaseURL, API_KEY, signature, token];
-		NSURL *url = [NSURL URLWithString:_url];
-
-		NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:60];
-
-		dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-		__block NSURLResponse *response;
-    __block NSError *error;
-    __block NSData *data;
-
-		NSURLSession *session = [NSURLSession sharedSession];
-		NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
-			completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-				data = d;
-				response = r;
-				error = e;
-
-				dispatch_semaphore_signal(semaphore);
-			}
-		];
-
-		[dataTask resume];
-		dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-		id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-		if (error) {
-			NSLog(@"Faced error while creating session: %@", error);
-
-			return nil;
-		}
-
-		if (data) {
-			if (json[@"error"] && json[@"message"]) {
-				NSLog(@"Faced an error while getting session: %@", json[@"message"]);
-
-				YTAlertView *alertView = [%c(YTAlertView) infoDialog];
-				alertView.title = @"Warning";
-				alertView.subtitle = [NSString stringWithFormat: @"Failed to create last.fm session: %@", json[@"message"]];
-				[alertView show];
-
-				[LFMClient createToken];
-
-				return nil;
-			}
-
-			[[NSUserDefaults standardUserDefaults] setObject:json[@"session"][@"key"] forKey:@"lfmSessionKey"];
-			NSLog(@"Session key fetched: %@", json[@"session"][@"key"]);
-
-			return json[@"session"][@"key"];
-		}
-
-		return nil;
-	}
-
-	+ (NSString *)urlEncodedString:(NSString *)str {
-		if ([str isKindOfClass:[NSString class]]) {
-			NSCharacterSet *allowed = [[NSCharacterSet characterSetWithCharactersInString:@"&+, \"#%<>[\\]^`{|}"] invertedSet];
-			return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
++ (void)presentSafariAuthWithToken:(NSString *)token {
+    NSString *encodedKey = LFMFormEncodeString(API_KEY);
+    NSString *encodedToken = LFMFormEncodeString(token);
+    NSString *urlStr = [NSString stringWithFormat:@"https://www.last.fm/api/auth/?api_key=%@&token=%@", encodedKey, encodedToken];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) {
+        g_authInFlight = NO;
+        return;
     }
 
-    return str;
-	}
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = LFMTopViewController();
+        if (!presenter) {
+            dispatch_async(LFMNetQueue(), ^{ g_authInFlight = NO; });
+            NSLog(@"Cannot present Last.fm Safari auth: no active view controller.");
+            return;
+        }
+        SFSafariViewController *safari = [[SFSafariViewController alloc] initWithURL:url];
+        safari.modalPresentationStyle = UIModalPresentationFullScreen;
+        YTMContentViewController *rootVC = [LFMYouTubeInstances rootViewController];
+        if (rootVC && [rootVC respondsToSelector:@selector(safariViewControllerDidFinish:)]) {
+            safari.delegate = rootVC;
+        }
+        [presenter presentViewController:safari animated:YES completion:nil];
+    });
+}
 
-	#pragma clang diagnostic push
-	#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-	+ (NSString *)md5:(NSString*)string {
-		unsigned char digest[CC_MD5_DIGEST_LENGTH], i;
++ (void)handleBrowserExit {
+    dispatch_async(LFMNetQueue(), ^{
+        NSString *token = g_pendingAuthToken;
+        g_pendingAuthToken = nil;
+        if (!token || token.length == 0) {
+            g_authInFlight = NO;
+            return;
+        }
 
-		CC_MD5([string UTF8String], (CC_LONG)[string lengthOfBytesUsingEncoding:NSUTF8StringEncoding], digest);
+        [self postSignedParameters:@{
+            @"method": @"auth.getSession",
+            @"token": token
+        }
+                           timeout:15.0
+                        completion:^(NSDictionary *json, NSError *networkError) {
+                            g_authInFlight = NO;
+                            if (networkError || !json) {
+                                NSLog(@"Failed to exchange Last.fm token for session: %@", networkError);
+                                return;
+                            }
+                            NSNumber *errObj = json[@"error"];
+                            if (errObj) {
+                                [self handleAPIErrorCode:errObj.integerValue message:json[@"message"]];
+                                LFMShowAlertOnMain(@"Last.fm", [NSString stringWithFormat:@"Failed to create session: %@", json[@"message"] ?: errObj]);
+                                return;
+                            }
+                            NSString *sk = json[@"session"][@"key"];
+                            if ([sk isKindOfClass:[NSString class]] && sk.length > 0) {
+                                [[NSUserDefaults standardUserDefaults] setObject:sk forKey:LFMSessionDefaultsKey];
+                                NSLog(@"Last.fm session established.");
+                                [self flushQueueOnNetQueue];
+                            }
+                        }];
+    });
+}
 
-		NSMutableString *ms = [NSMutableString string];
-		for (i=0; i < CC_MD5_DIGEST_LENGTH; i++) {
-			[ms appendFormat: @"%02x", (int)(digest[i])];
-		}
++ (void)setNowPlaying:(NSString *)track artist:(NSString *)artist duration:(double)duration {
+    [self setNowPlaying:track artist:artist album:nil duration:duration];
+}
 
-		return [ms copy];
-	}
-	#pragma clang diagnostic pop
++ (void)setNowPlaying:(NSString *)track
+               artist:(NSString *)artist
+                album:(NSString *)album
+             duration:(double)duration {
+    if (track.length == 0 || artist.length == 0) return;
+
+    dispatch_async(LFMNetQueue(), ^{
+        if (g_apiKeyStopped) return;
+        NSString *sk = [[NSUserDefaults standardUserDefaults] stringForKey:LFMSessionDefaultsKey];
+        if (sk.length == 0) {
+            [self startAuthUserInitiated:NO];
+            return;
+        }
+
+        NSMutableDictionary<NSString *, id> *params = [NSMutableDictionary dictionaryWithDictionary:@{
+            @"method": @"track.updateNowPlaying",
+            @"artist": artist,
+            @"track": track,
+            @"sk": sk
+        }];
+        if (album.length > 0) {
+            params[@"album"] = album;
+        }
+        NSInteger durSec = (NSInteger)llround(duration);
+        if (durSec > 0) {
+            params[@"duration"] = @(durSec);
+        }
+
+        // Spec section 4: Now-playing failures must NOT be retried.
+        [self postSignedParameters:params
+                           timeout:10.0
+                        completion:^(NSDictionary *json, NSError *networkError) {
+                            if (networkError) {
+                                NSLog(@"updateNowPlaying network error (not retrying): %@", networkError.localizedDescription);
+                                return;
+                            }
+                            NSNumber *errObj = json[@"error"];
+                            if (errObj) {
+                                [self handleAPIErrorCode:errObj.integerValue message:json[@"message"]];
+                                return;
+                            }
+                            NSLog(@"Updated Now Playing: %@ - %@", artist, track);
+                        }];
+    });
+}
+
++ (void)scrobble:(NSString *)track artist:(NSString *)artist duration:(double)duration elapsed:(double)elapsed {
+    int64_t nowUtc = (int64_t)[[NSDate date] timeIntervalSince1970];
+    int64_t startTs = nowUtc - (int64_t)floor(fmax(0.0, elapsed));
+    [self scrobble:track artist:artist album:nil duration:duration timestamp:startTs];
+}
+
++ (void)scrobble:(NSString *)track
+          artist:(NSString *)artist
+           album:(NSString *)album
+        duration:(double)duration
+       timestamp:(int64_t)timestamp {
+    if (track.length == 0 || artist.length == 0 || timestamp <= 0) return;
+
+    dispatch_async(LFMNetQueue(), ^{
+        LFMLoadQueueOnNetQueue();
+        LFMPruneExpiredOnNetQueue();
+
+        NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithDictionary:@{
+            @"artist": artist,
+            @"track": track,
+            @"timestamp": @(timestamp)
+        }];
+        if (album.length > 0) {
+            entry[@"album"] = album;
+        }
+        NSInteger durSec = (NSInteger)llround(duration);
+        if (durSec > 0) {
+            entry[@"duration"] = @(durSec);
+        }
+
+        if (g_scrobbleQueue.count >= LFMMaxQueueSize) {
+            [g_scrobbleQueue removeObjectAtIndex:0];
+        }
+        [g_scrobbleQueue addObject:entry];
+        LFMSaveQueueOnNetQueue();
+
+        [self flushQueueOnNetQueue];
+    });
+}
+
++ (void)flushQueue {
+    dispatch_async(LFMNetQueue(), ^{
+        g_nextRetryNotBefore = 0;
+        [self flushQueueOnNetQueue];
+    });
+}
+
++ (void)scheduleRetryWithMinimumDelay:(NSTimeInterval)minDelay {
+    g_retryAttempt++;
+    double expDelay = pow(2.0, (double)MIN(g_retryAttempt, (NSUInteger)8)) * 5.0;
+    NSTimeInterval delay = fmax(minDelay, fmin(expDelay, 600.0));
+    g_nextRetryNotBefore = [[NSDate date] timeIntervalSince1970] + delay;
+    NSLog(@"Scheduled scrobble queue retry in %.0f s (pending=%lu)", delay, (unsigned long)g_scrobbleQueue.count);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), LFMNetQueue(), ^{
+        [self flushQueueOnNetQueue];
+    });
+}
+
++ (void)flushQueueOnNetQueue {
+    if (g_apiKeyStopped || g_flushInFlight) return;
+
+    LFMLoadQueueOnNetQueue();
+    LFMPruneExpiredOnNetQueue();
+    if (g_scrobbleQueue.count == 0) return;
+
+    NSString *sk = [[NSUserDefaults standardUserDefaults] stringForKey:LFMSessionDefaultsKey];
+    if (sk.length == 0) {
+        [self startAuthUserInitiated:NO];
+        return;
+    }
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now < g_nextRetryNotBefore) return;
+
+    NSUInteger batchCount = MIN(g_scrobbleQueue.count, LFMMaxBatchSize);
+    NSArray<NSDictionary *> *batch = [g_scrobbleQueue subarrayWithRange:NSMakeRange(0, batchCount)];
+
+    NSMutableDictionary<NSString *, id> *params = [NSMutableDictionary dictionary];
+    params[@"method"] = @"track.scrobble";
+    params[@"sk"] = sk;
+
+    if (batchCount == 1) {
+        NSDictionary *item = batch[0];
+        params[@"artist"] = item[@"artist"];
+        params[@"track"] = item[@"track"];
+        params[@"timestamp"] = item[@"timestamp"];
+        if ([item[@"album"] length] > 0) {
+            params[@"album"] = item[@"album"];
+        }
+        if ([item[@"duration"] integerValue] > 0) {
+            params[@"duration"] = item[@"duration"];
+        }
+    } else {
+        for (NSUInteger i = 0; i < batchCount; i++) {
+            NSDictionary *item = batch[i];
+            params[[NSString stringWithFormat:@"artist[%lu]", (unsigned long)i]] = item[@"artist"];
+            params[[NSString stringWithFormat:@"track[%lu]", (unsigned long)i]] = item[@"track"];
+            params[[NSString stringWithFormat:@"timestamp[%lu]", (unsigned long)i]] = item[@"timestamp"];
+            if ([item[@"album"] length] > 0) {
+                params[[NSString stringWithFormat:@"album[%lu]", (unsigned long)i]] = item[@"album"];
+            }
+            if ([item[@"duration"] integerValue] > 0) {
+                params[[NSString stringWithFormat:@"duration[%lu]", (unsigned long)i]] = item[@"duration"];
+            }
+        }
+    }
+
+    g_flushInFlight = YES;
+    [self postSignedParameters:params
+                       timeout:10.0
+                    completion:^(NSDictionary *json, NSError *networkError) {
+                        g_flushInFlight = NO;
+
+                        if (networkError || !json) {
+                            NSLog(@"Scrobble network error (keeping %lu item(s) in queue): %@",
+                                  (unsigned long)batchCount, networkError.localizedDescription);
+                            [self scheduleRetryWithMinimumDelay:15.0];
+                            return;
+                        }
+
+                        NSNumber *errObj = json[@"error"];
+                        if (errObj) {
+                            NSInteger code = errObj.integerValue;
+                            [self handleAPIErrorCode:code message:json[@"message"]];
+
+                            if (code == 11 || code == 16) {
+                                // Temporary service error: keep in queue and retry with backoff
+                                [self scheduleRetryWithMinimumDelay:15.0];
+                            } else if (code == 29) {
+                                // Rate limit: keep in queue and back off longer
+                                [self scheduleRetryWithMinimumDelay:60.0];
+                            } else if (code == 9 || code == 10 || code == 26) {
+                                // Session or API key issue: keep queued scrobbles until re-authenticated
+                            } else {
+                                // 4, 6, 13, others: permanent parameter/signature rejection -> drop batch
+                                NSLog(@"Dropping %lu scrobble(s) due to unrecoverable error %ld", (unsigned long)batchCount, (long)code);
+                                if (g_scrobbleQueue.count >= batchCount) {
+                                    [g_scrobbleQueue removeObjectsInRange:NSMakeRange(0, batchCount)];
+                                } else {
+                                    [g_scrobbleQueue removeAllObjects];
+                                }
+                                LFMSaveQueueOnNetQueue();
+                            }
+                            return;
+                        }
+
+                        // Success: inspect ignored count and advance queue
+                        g_retryAttempt = 0;
+                        g_nextRetryNotBefore = 0;
+
+                        NSDictionary *attr = json[@"scrobbles"][@"@attr"];
+                        NSInteger accepted = [attr[@"accepted"] integerValue];
+                        NSInteger ignored = [attr[@"ignored"] integerValue];
+                        NSLog(@"Scrobble batch complete: accepted=%ld ignored=%ld", (long)accepted, (long)ignored);
+                        if (ignored > 0) {
+                            NSLog(@"Last.fm ignored scrobble details: %@", json[@"scrobbles"]);
+                        }
+
+                        if (g_scrobbleQueue.count >= batchCount) {
+                            [g_scrobbleQueue removeObjectsInRange:NSMakeRange(0, batchCount)];
+                        } else {
+                            [g_scrobbleQueue removeAllObjects];
+                        }
+                        LFMSaveQueueOnNetQueue();
+
+                        if (g_scrobbleQueue.count > 0) {
+                            [self flushQueueOnNetQueue];
+                        }
+                    }];
+}
+
++ (void)sendTestScrobbleWithCompletion:(void (^)(BOOL success, NSString *message))completion {
+    dispatch_async(LFMNetQueue(), ^{
+        NSString *sk = [[NSUserDefaults standardUserDefaults] stringForKey:LFMSessionDefaultsKey];
+        if (sk.length == 0) {
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(NO, @"Not logged in to Last.fm. Please authenticate first.");
+                });
+            }
+            return;
+        }
+        int64_t nowUtc = (int64_t)[[NSDate date] timeIntervalSince1970];
+        [self postSignedParameters:@{
+            @"method": @"track.updateNowPlaying",
+            @"artist": @"Rick Astley",
+            @"track": @"Never Gonna Give You Up",
+            @"duration": @213,
+            @"sk": sk
+        }
+                           timeout:10.0
+                        completion:^(NSDictionary *json, NSError *networkError) {
+                            if (networkError || !json) {
+                                if (completion) {
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        completion(NO, networkError.localizedDescription ?: @"Network error");
+                                    });
+                                }
+                                return;
+                            }
+                            NSNumber *errObj = json[@"error"];
+                            if (errObj) {
+                                [self handleAPIErrorCode:errObj.integerValue message:json[@"message"]];
+                                if (completion) {
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        completion(NO, json[@"message"] ?: @"Last.fm API error");
+                                    });
+                                }
+                                return;
+                            }
+                            if (completion) {
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    completion(YES, [NSString stringWithFormat:@"Now Playing test sent at %lld.", (long long)nowUtc]);
+                                });
+                            }
+                        }];
+    });
+}
+
 @end

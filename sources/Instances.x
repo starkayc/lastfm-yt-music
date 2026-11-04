@@ -1,47 +1,29 @@
-#include "../headers/Instances.h"
+// GPL-3.0-or-later
+#import "../headers/Instances.h"
+#import "../headers/Client.h"
 
-static YTMContentViewController *g_ytRootViewController = nil;
-static YTQueueController *g_ytQueueController = nil;
+static __weak YTMContentViewController *g_ytRootViewController = nil;
 
 @implementation LFMYouTubeInstances
 
-+ (YTQueueController*) queueController {
-	return g_ytQueueController;
-}
-
-+ (YTMContentViewController*) rootViewController {
-	return g_ytRootViewController;
++ (YTMContentViewController *)rootViewController {
+    return g_ytRootViewController;
 }
 
 @end
 
-%hook YTQueueController
-
-- (id) initWithAccountID:(id)accountId restorableQueueState:(id)state {
-	YTQueueController *orig = %orig;
-
-	if (orig) {
-		g_ytQueueController = orig;
-	}
-
-	return orig;
-}
-
-%end
-
 %hook YTMContentViewController
 
-- (void) loadView {
-	%orig;
-
-	if (self) {
-		g_ytRootViewController = self;
-	}
+- (void)loadView {
+    %orig;
+    if (self) {
+        g_ytRootViewController = self;
+    }
 }
 
 %new
-- (void) safariViewControllerDidFinish:(SFSafariViewController*) controller {
-	[LFMClient handleBrowserExit];
-};
+- (void)safariViewControllerDidFinish:(SFSafariViewController *)controller {
+    [LFMClient handleBrowserExit];
+}
 
 %end
