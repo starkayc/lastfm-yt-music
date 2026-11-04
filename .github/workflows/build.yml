@@ -70,7 +70,7 @@ jobs:
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LastFMYouTubeMusic-deb
+          name: YTMLastFM-deb
           path: release_files/*.deb
           if-no-files-found: error
 
@@ -94,7 +94,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
-          name: "LastFMYouTubeMusic v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
+          name: "YTMLastFM v1.0.${{ steps.buildnum.outputs.BUILD_NUM }}"
           body: |
             Rootless `.deb` build of Last.fm for YouTube Music iOS.
           files: release_files/*.deb

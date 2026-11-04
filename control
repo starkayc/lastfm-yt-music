@@ -1,9 +1,9 @@
-Package: me.marioparaschiv.lastfm4ytm
-Name: Last.fm for YouTube Music
+Package: com.starkayc.ytmlastfm
+Name: YTMusic Last.fm
 Version: 1.0.0
 Architecture: iphoneos-arm64
 Description: Last.fm scrobbler and Now Playing integration for YouTube Music
 Maintainer: StarKayC
-Author: eternal, StarKayC
+Author: StarKayC
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000)

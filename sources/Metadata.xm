@@ -264,7 +264,7 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
                                                        timeoutInterval:6.0];
-        [req setValue:[NSString stringWithFormat:@"LastFMYouTubeMusic/1.0 ( %@ )", mbEmail] forHTTPHeaderField:@"User-Agent"];
+        [req setValue:[NSString stringWithFormat:@"YTMLastFM/1.0 ( %@ )", mbEmail] forHTTPHeaderField:@"User-Agent"];
 
         NSURLSessionDataTask *task = [[NSURLSession sharedSession]
             dataTaskWithRequest:req

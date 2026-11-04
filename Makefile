@@ -14,7 +14,7 @@ ifeq ($(strip $(LASTFM_API_SECRET)),)
 $(error Set LASTFM_API_KEY and LASTFM_API_SECRET, e.g. make package FINALPACKAGE=1 LASTFM_API_KEY=... LASTFM_API_SECRET=...)
 endif
 
-TWEAK_NAME = LastFMYouTubeMusic
+TWEAK_NAME = YTMLastFM
 
 $(TWEAK_NAME)_FILES = $(wildcard sources/*.x sources/*.xm sources/*.m)
 ifeq ($(SIDELOAD_FIXES),1)
