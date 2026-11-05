@@ -48,6 +48,13 @@ jobs:
           echo "TAG=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved package version: $VERSION"
 
+      - name: Run LFMCore unit tests
+        run: |
+          set -euo pipefail
+          clang -fobjc-arc -Wno-deprecated-declarations -framework Foundation \
+            -Iheaders tests/test_lfm_core.m -o "$RUNNER_TEMP/test_lfm_core"
+          "$RUNNER_TEMP/test_lfm_core"
+
       - name: Install dependencies
         run: |
           set -euo pipefail

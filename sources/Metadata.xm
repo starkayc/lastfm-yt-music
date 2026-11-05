@@ -87,7 +87,25 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
         @"\\(.*[0-9]{1,2}\\/[0-9]{1,2}\\/[0-9]{2,4}.*\\)",
         @"sub\\s*español",
         @"\\s\\(Letra\\)",
-        @"\\s\\(En\\svivo\\)"
+        @"\\s\\(En\\svivo\\)",
+        // yt video cruft, space tolerant
+        @"\\s*[([]\\s*(of+icial\\s*)?(music\\s*)?(video|audio)\\s*[)\]]$",
+        @"\\s*[([]\\s*(of+icial\\s*)?(mv|m/v|visuali[sz]er|lyric\\s*video)s?\\s*[)\]]$",
+        @"\\s*[-–—]\\s*(of+icial\\s*)?(music\\s*)?(video|audio)\\s*$",
+        @"\\s*[([]\\s*(of+icial\\s*)?(hd|hq|4k|8k|1080p|720p)\\s*(video|audio|mv|remaster(ed)?)?\\s*[)\]]$",
+        // slowed / sped up / nightcore edits
+        @"\\s*[(\\[]?\\s*[-–—]?\\s*(super\\s*)?(slowed|sped\\s*up|speed\\s*up)(\\s*(\\+|n|&|and)\\s*reverb)?(\\s*(up\\s*)?version)?\\s*[)\]]?$",
+        @"^\\s*nightcore\\s*[-–—]\\s*",
+        @"\\s*[([]?\\s*nightcore\\s*[)\]]?$",
+        @"\\s*[([]?\\s*bass\\s*boost(ed)?\\s*[)\]]?$",
+        // lyrics residues
+        @"\\s+with\\s+lyrics?$",
+        @"\\s*//\\s*(letra|lyrics?)$",
+        @"^\\s*@\\S+\\s*[-–—]\\s*",
+        // emoji + dangling opener
+        @"^[🎵🎶]\\s*",
+        @"\\s*[🎵🎶]\\s*$",
+        @"\\s+[(\\[]\\s*$"
     ];
 }
 
@@ -228,6 +246,16 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
             NSString *cleanArtist = [self cleanString:item.artist withRegexes:regexes];
             if (cleanTitle.length > 0) item.title = cleanTitle;
             if (cleanArtist.length > 0) item.artist = cleanArtist;
+        }
+
+        // Uploader leaked into the artist field: pull the real artist out of "Artist - Title".
+        NSString *splitArtist = nil;
+        NSString *splitTitle = nil;
+        LFMSplitKind kind = LFMSplitArtistFromTitle(item.title, item.artist, &splitArtist, &splitTitle);
+        if (kind != LFMSplitKindNone && splitArtist.length > 0 && splitTitle.length > 0) {
+            NSLog(@"Artist/title split (%ld): %@ - %@", (long)kind, splitArtist, splitTitle);
+            item.artist = splitArtist;
+            item.title = splitTitle;
         }
 
         if (!mbEnabled || mbEmail.length == 0) {

@@ -8,6 +8,14 @@
 + (NSString *)urlEncodedString:(NSString *)str;
 + (NSString *)md5:(NSString *)string;
 
+// Runtime credential override (Settings → Account & Queue). Empty override = built-in build values.
++ (NSString *)apiKey;
++ (NSString *)apiSecret;
++ (NSString *)apiKeyOverride;
++ (NSString *)apiSecretOverride;
++ (void)setAPIKeyOverride:(NSString *)key secretOverride:(NSString *)secret;
++ (BOOL)usingCustomCredentials;
+
 + (BOOL)hasSession;
 + (void)startAuthIfNeeded;
 + (void)startAuthUserInitiated:(BOOL)userInitiated;

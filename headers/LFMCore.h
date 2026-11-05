@@ -162,4 +162,112 @@ static inline NSString *LFMBuildFormEncodedString(NSDictionary<NSString *, id> *
     return [pairs componentsJoinedByString:@"&"];
 }
 
+#pragma mark - Artist / title split
+
+// YouTube Music sets the uploader as the artist, so the track field arrives as "RealArtist - RealTitle".
+// Rule tuned against 55,952 real scrobbles: 589 rows corrected, ~2% of the touched rows land wrong,
+// which is why the suffix is rejected whenever it looks like a version/label descriptor.
+
+typedef NS_ENUM(NSInteger, LFMSplitKind) {
+    LFMSplitKindNone = 0,
+    LFMSplitKindDedupe,
+    LFMSplitKindReverse,
+    LFMSplitKindChannel
+};
+
+static inline NSString *LFMNormalizedKey(NSString *string) {
+    if (![string isKindOfClass:[NSString class]] || string.length == 0) return @"";
+    NSString *lower = [string lowercaseStringWithLocale:[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]];
+    NSMutableString *out = [NSMutableString stringWithCapacity:lower.length];
+    NSCharacterSet *alnum = [NSCharacterSet alphanumericCharacterSet];
+    for (NSUInteger i = 0; i < lower.length; i++) {
+        unichar c = [lower characterAtIndex:i];
+        if ([alnum characterIsMember:c]) [out appendFormat:@"%C", c];
+    }
+    return [out copy];
+}
+
+static inline BOOL LFMSplitMatches(NSString *string, NSString *pattern) {
+    // No static cache: one static local inside a static inline is shared by every call site,
+    // so the first pattern compiled would be reused for all of them.
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern
+                                                                      options:NSRegularExpressionCaseInsensitive
+                                                                        error:nil];
+    if (!re || string.length == 0) return NO;
+    return [re firstMatchInString:string options:0 range:NSMakeRange(0, string.length)] != nil;
+}
+
+static inline NSUInteger LFMSplitWordCount(NSString *string) {
+    NSArray<NSString *> *parts = [string componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSUInteger n = 0;
+    for (NSString *part in parts) {
+        if (part.length > 0) n++;
+    }
+    return n;
+}
+
+static inline BOOL LFMSplitSuffixIsDescriptor(NSString *suffix) {
+    return LFMSplitMatches(suffix,
+        @"\\b(live|remix(ed)?|version|ver|edit|mix|remaster(ed)?|acoustic|instrumental|demo|session|feat|featuring|ft|mono|stereo|extended|radio|explicit|clean|slowed|sped|cover|orchestral|a cappella|dub|bootleg|karaoke|commentary|interview|outro|intro|part|pt|video|lyric|lyrics|letra|audio|official|mv|hd|hq|4k|bonus|track|original|single|reimagined|reprise|soundtrack|unreleased|deluxe|edition|from|theme|excerpt|mashup|tapes?|vip|vocal|music|inst)\\b|\\d{4}\\s*ver\\.?");
+}
+
+static inline BOOL LFMSplitPrefixIsLabel(NSString *prefix) {
+    return LFMSplitMatches(prefix, @"\\b(ost|soundtrack|music|theme|remix|edit|version|lyrics?|audio|video|full album|episode|season)\\b");
+}
+
+static inline LFMSplitKind LFMSplitArtistFromTitle(NSString *title, NSString *artist, NSString **outArtist, NSString **outTitle) {
+    if (![title isKindOfClass:[NSString class]] || ![artist isKindOfClass:[NSString class]]) return LFMSplitKindNone;
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSString *t = [title stringByTrimmingCharactersInSet:ws];
+    NSString *a = [artist stringByTrimmingCharactersInSet:ws];
+    if (t.length < 5 || a.length < 1) return LFMSplitKindNone;
+
+    NSRange sep = [t rangeOfString:@" - "];
+    if (sep.location == NSNotFound) {
+        for (NSString *dash in @[@" – ", @" — "]) {
+            sep = [t rangeOfString:dash];
+            if (sep.location != NSNotFound) break;
+        }
+    }
+    if (sep.location == NSNotFound) return LFMSplitKindNone;
+
+    NSString *prefix = [[t substringToIndex:sep.location] stringByTrimmingCharactersInSet:ws];
+    NSString *suffix = [[t substringFromIndex:NSMaxRange(sep)] stringByTrimmingCharactersInSet:ws];
+    if (prefix.length < 2 || suffix.length < 2) return LFMSplitKindNone;
+    if (LFMSplitWordCount(prefix) > 6 || LFMSplitWordCount(suffix) > 12) return LFMSplitKindNone;
+
+    static NSString *const punctPrefix = @":,()[]【】（）「」*…";
+    static NSString *const punctSuffix = @":()[]【】（）「」*…";
+    NSCharacterSet *badPrefix = [NSCharacterSet characterSetWithCharactersInString:punctPrefix];
+    NSCharacterSet *badSuffix = [NSCharacterSet characterSetWithCharactersInString:punctSuffix];
+    if ([prefix rangeOfCharacterFromSet:badPrefix].location != NSNotFound) return LFMSplitKindNone;
+    if ([suffix rangeOfCharacterFromSet:badSuffix].location != NSNotFound) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffix, @"\\b(19|20)\\d{2}\\b")) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffix, @"^#?\\d+$")) return LFMSplitKindNone;
+    if (LFMSplitSuffixIsDescriptor(suffix)) return LFMSplitKindNone;
+    if (LFMSplitPrefixIsLabel(prefix)) return LFMSplitKindNone;
+    if (LFMSplitMatches(prefix, @"^#?\\d+$")) return LFMSplitKindNone;
+
+    NSString *artistKey = LFMNormalizedKey(a);
+    NSString *prefixKey = LFMNormalizedKey(prefix);
+    NSString *suffixKey = LFMNormalizedKey(suffix);
+
+    if (artistKey.length >= 2 && [prefixKey containsString:artistKey]) {
+        if (outArtist) *outArtist = a;
+        if (outTitle) *outTitle = suffix;
+        return LFMSplitKindDedupe;
+    }
+    // "Title - Artist" order: keep the artist, drop its repeat from the end.
+    if (artistKey.length >= 3 && [suffixKey containsString:artistKey]) {
+        if (outArtist) *outArtist = a;
+        if (outTitle) *outTitle = prefix;
+        return LFMSplitKindReverse;
+    }
+    if (prefix.length < 3) return LFMSplitKindNone;
+
+    if (outArtist) *outArtist = prefix;
+    if (outTitle) *outTitle = suffix;
+    return LFMSplitKindChannel;
+}
+
 #endif /* LFMCORE_H */

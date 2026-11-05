@@ -8,6 +8,8 @@
 
 static NSString *const LFMBaseURL = @"https://ws.audioscrobbler.com/2.0/";
 static NSString *const LFMSessionDefaultsKey = @"lfmSessionKey";
+static NSString *const LFMAPIKeyOverrideKey = @"lfm_api_key_override";
+static NSString *const LFMAPISecretOverrideKey = @"lfm_api_secret_override";
 static const NSTimeInterval LFMMaxScrobbleAgeSeconds = 14.0 * 86400.0;
 static const NSUInteger LFMMaxBatchSize = 50;
 static const NSUInteger LFMMaxQueueSize = 1000;
@@ -121,6 +123,49 @@ static void LFMPruneExpiredOnNetQueue(void) {
     return LFMFormEncodeString(LFMStringFromValue(str));
 }
 
++ (NSString *)apiKeyOverride {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:LFMAPIKeyOverrideKey] ?: @"";
+}
+
++ (NSString *)apiSecretOverride {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:LFMAPISecretOverrideKey] ?: @"";
+}
+
++ (BOOL)usingCustomCredentials {
+    return [self apiKeyOverride].length > 0;
+}
+
++ (NSString *)apiKey {
+    NSString *override = [self apiKeyOverride];
+    return override.length > 0 ? override : API_KEY;
+}
+
++ (NSString *)apiSecret {
+    NSString *override = [self apiSecretOverride];
+    return override.length > 0 ? override : API_SECRET;
+}
+
++ (void)setAPIKeyOverride:(NSString *)key secretOverride:(NSString *)secret {
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    if (key.length > 0) {
+        [prefs setObject:key forKey:LFMAPIKeyOverrideKey];
+    } else {
+        [prefs removeObjectForKey:LFMAPIKeyOverrideKey];
+    }
+    if (secret.length > 0) {
+        [prefs setObject:secret forKey:LFMAPISecretOverrideKey];
+    } else {
+        [prefs removeObjectForKey:LFMAPISecretOverrideKey];
+    }
+
+    // A stored session key belongs to the old API key, and the error latch must reopen.
+    [self clearSession];
+    dispatch_async(LFMNetQueue(), ^{
+        g_apiKeyStopped = NO;
+        g_apiKeyAlertShown = NO;
+    });
+}
+
 + (NSString *)md5:(NSString *)string {
     return LFMMD5Hex(string);
 }
@@ -158,9 +203,9 @@ static void LFMPruneExpiredOnNetQueue(void) {
     }
 
     NSMutableDictionary<NSString *, id> *fullParams = [NSMutableDictionary dictionaryWithDictionary:params];
-    fullParams[@"api_key"] = API_KEY;
+    fullParams[@"api_key"] = [self apiKey];
     fullParams[@"format"] = @"json";
-    fullParams[@"api_sig"] = LFMMakeSignature(fullParams, API_SECRET);
+    fullParams[@"api_sig"] = LFMMakeSignature(fullParams, [self apiSecret]);
 
     NSString *bodyString = LFMBuildFormEncodedString(fullParams);
     NSData *bodyData = [bodyString dataUsingEncoding:NSUTF8StringEncoding];
@@ -261,7 +306,7 @@ static void LFMPruneExpiredOnNetQueue(void) {
 }
 
 + (void)presentSafariAuthWithToken:(NSString *)token {
-    NSString *encodedKey = LFMFormEncodeString(API_KEY);
+    NSString *encodedKey = LFMFormEncodeString([self apiKey]);
     NSString *encodedToken = LFMFormEncodeString(token);
     NSString *urlStr = [NSString stringWithFormat:@"https://www.last.fm/api/auth/?api_key=%@&token=%@", encodedKey, encodedToken];
     NSURL *url = [NSURL URLWithString:urlStr];

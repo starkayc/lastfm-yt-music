@@ -70,6 +70,12 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
     return label;
 }
 
+static NSString *LFMMaskedCredential(NSString *value) {
+    if (value.length == 0) return @"Not Set";
+    if (value.length <= 8) return @"••••••••";
+    return [[value substringToIndex:6] stringByAppendingString:@"…"];
+}
+
 #pragma mark - Regex Filters Subcontroller (YTMusicUltimate InsetGrouped style)
 
 @interface LFMRegularExpressionsViewController : UIViewController <UITableViewDelegate, UITableViewDataSource>
@@ -263,6 +269,9 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
     if (section == 0) {
         return @"Scrobbles tracks longer than 30 seconds after 50% or 4 minutes of accumulated playback.";
     }
+    if (section == 2) {
+        return @"API Key and API Secret fall back to the values baked into the build. Changing either one clears the saved session, so you have to sign in again.";
+    }
     if (section == 3) {
         NSDictionary *infoDictionary = [[NSBundle mainBundle] infoDictionary];
         NSString *appVersion = infoDictionary[@"CFBundleShortVersionString"] ?: @"unknown";
@@ -285,7 +294,7 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
         case 1:
             return [_prefs boolForKey:@"lfm_musicbrainz_enabled"] ? 5 : 4;
         case 2:
-            return 4; // Authenticate, Send Test Now Playing, Flush Offline Queue, Clear Session
+            return 6; // Authenticate, Send Test Now Playing, Flush Offline Queue, Clear Session, API Key, API Secret
         case 3:
             return 1; // Source Code link
         default:
@@ -406,6 +415,19 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.imageView.image = [UIImage systemImageNamed:@"trash"];
             cell.imageView.tintColor = [UIColor redColor];
+        } else {
+            BOOL isSecret = indexPath.row == 5;
+            NSString *override = isSecret ? [LFMClient apiSecretOverride] : [LFMClient apiKeyOverride];
+            NSString *effective = isSecret ? [LFMClient apiSecret] : [LFMClient apiKey];
+            cell.textLabel.text = isSecret ? @"API Secret" : @"API Key";
+            cell.detailTextLabel.text = override.length > 0
+                ? @"Custom value saved on this device"
+                : @"Using the value baked into the build";
+            cell.detailTextLabel.numberOfLines = 0;
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.imageView.image = [UIImage systemImageNamed:isSecret ? @"key.horizontal" : @"key"];
+            cell.accessoryView = LFMRightDetailLabel(LFMMaskedCredential(effective),
+                                                     override.length > 0 ? [UIColor systemGreenColor] : nil);
         }
         return cell;
     }
@@ -477,6 +499,10 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
         } else if (indexPath.row == 3) {
             [LFMClient clearSession];
             [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationAutomatic];
+        } else if (indexPath.row == 4) {
+            [self promptForCredentialSecret:NO];
+        } else if (indexPath.row == 5) {
+            [self promptForCredentialSecret:YES];
         }
         return;
     }
@@ -541,6 +567,56 @@ static UILabel *LFMRightDetailLabel(NSString *text, UIColor *color) {
                                                     LFMSwitchSetOn(toggle, NO);
                                                 }
                                             }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)promptForCredentialSecret:(BOOL)isSecret {
+    NSString *title = isSecret ? @"Last.fm API Secret" : @"Last.fm API Key";
+    NSString *current = isSecret ? [LFMClient apiSecretOverride] : [LFMClient apiKeyOverride];
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:title
+                         message:@"Create a key at last.fm/api/account/create. Leave empty to use the key baked into the build."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = isSecret ? @"32-character secret" : @"32-character api key";
+        textField.text = current;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.secureTextEntry = isSecret;
+        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        NSString *entered = alert.textFields.firstObject.text;
+        entered = [entered stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+        NSString *key = isSecret ? [LFMClient apiKeyOverride] : entered;
+        NSString *secret = isSecret ? entered : [LFMClient apiSecretOverride];
+        [LFMClient setAPIKeyOverride:key secretOverride:secret];
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+                      withRowAnimation:UITableViewRowAnimationAutomatic];
+        // Present the follow-up only after the prompt above finishes dismissing.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self promptForReauthAfterCredentialChange];
+        });
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)promptForReauthAfterCredentialChange {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Credentials Saved"
+                         message:@"The stored Last.fm session was cleared. Sign in again to keep scrobbling."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Sign In"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [self dismissViewControllerAnimated:YES completion:^{
+            [LFMClient startAuthUserInitiated:YES];
+        }];
+    }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
