@@ -292,7 +292,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
         case 0:
             return 1; // Master Enabled switch
         case 1:
-            return [_prefs boolForKey:@"lfm_musicbrainz_enabled"] ? 5 : 4;
+            return [_prefs boolForKey:@"lfm_musicbrainz_enabled"] ? 6 : 5;
         case 2:
             return 6; // Authenticate, Send Test Now Playing, Flush Offline Queue, Clear Session, API Key, API Secret
         case 3:
@@ -321,7 +321,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
 
     // Section 1: Metadata & Filters (PlayerSettingsController subtitle + blue ABCSwitch style)
     if (indexPath.section == 1) {
-        if (indexPath.row < 3) {
+        if (indexPath.row < 4) {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"boolsCell"];
             NSArray<NSDictionary *> *toggleItems = @[
                 @{
@@ -333,6 +333,11 @@ static NSString *LFMMaskedCredential(NSString *value) {
                     @"title": @"Regex Title Cleanup",
                     @"desc": @"Strip tags like (Remastered), [Explicit], and (Official Video) before scrobbling.",
                     @"key": @"lfm_regex_cleanup_enabled"
+                },
+                @{
+                    @"title": @"Artist/Title Split",
+                    @"desc": @"Turn \"Channel Name - Real Song\" into the real artist and song when YouTube passes the uploader as the artist.",
+                    @"key": @"lfm_artist_split_enabled"
                 },
                 @{
                     @"title": @"MusicBrainz Correction",
@@ -354,7 +359,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
             return cell;
         }
 
-        if (indexPath.row == 3) {
+        if (indexPath.row == 4) {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"navCell"];
             cell.textLabel.text = @"Regex Filters";
             cell.detailTextLabel.text = @"View, add, or reset regular expression patterns";
@@ -365,7 +370,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
             return cell;
         }
 
-        if (indexPath.row == 4) {
+        if (indexPath.row == 5) {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"mbEmailCell"];
             cell.textLabel.text = @"MusicBrainz Contact Email";
             cell.detailTextLabel.text = @"Required in User-Agent header for MusicBrainz API requests";
@@ -447,7 +452,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
 
 - (BOOL)tableView:(__unused UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) return NO;
-    if (indexPath.section == 1 && indexPath.row < 3) return NO;
+    if (indexPath.section == 1 && indexPath.row < 4) return NO;
     return YES;
 }
 
@@ -455,10 +460,10 @@ static NSString *LFMMaskedCredential(NSString *value) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
     if (indexPath.section == 1) {
-        if (indexPath.row == 3) {
+        if (indexPath.row == 4) {
             LFMRegularExpressionsViewController *vc = [[LFMRegularExpressionsViewController alloc] init];
             [self.navigationController pushViewController:vc animated:YES];
-        } else if (indexPath.row == 4) {
+        } else if (indexPath.row == 5) {
             [self promptForEmailWithSwitch:nil];
         }
         return;
@@ -528,6 +533,8 @@ static NSString *LFMMaskedCredential(NSString *value) {
     } else if (sender.tag == 1) {
         [_prefs setBool:on forKey:@"lfm_regex_cleanup_enabled"];
     } else if (sender.tag == 2) {
+        [_prefs setBool:on forKey:@"lfm_artist_split_enabled"];
+    } else if (sender.tag == 3) {
         if (on) {
             NSString *email = [_prefs stringForKey:@"lfm_musicbrainz_email"];
             if (email.length == 0) {
@@ -690,6 +697,7 @@ static NSString *LFMMaskedCredential(NSString *value) {
         @"lfm_scrobbler_enabled": @YES,
         @"lfm_prefer_oembed": @NO,
         @"lfm_regex_cleanup_enabled": @NO,
+        @"lfm_artist_split_enabled": @YES,
         @"lfm_musicbrainz_enabled": @NO,
         @"lfm_custom_regexes": [LFMMetadata defaultRegexes]
     }];

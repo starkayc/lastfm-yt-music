@@ -238,6 +238,7 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
         NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
         BOOL regexEnabled = [prefs boolForKey:@"lfm_regex_cleanup_enabled"];
         BOOL mbEnabled = [prefs boolForKey:@"lfm_musicbrainz_enabled"];
+        BOOL artistSplitEnabled = [prefs boolForKey:@"lfm_artist_split_enabled"];
         NSString *mbEmail = [prefs stringForKey:@"lfm_musicbrainz_email"];
 
         if (regexEnabled) {
@@ -249,13 +250,15 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
         }
 
         // Uploader leaked into the artist field: pull the real artist out of "Artist - Title".
-        NSString *splitArtist = nil;
-        NSString *splitTitle = nil;
-        LFMSplitKind kind = LFMSplitArtistFromTitle(item.title, item.artist, &splitArtist, &splitTitle);
-        if (kind != LFMSplitKindNone && splitArtist.length > 0 && splitTitle.length > 0) {
-            NSLog(@"Artist/title split (%ld): %@ - %@", (long)kind, splitArtist, splitTitle);
-            item.artist = splitArtist;
-            item.title = splitTitle;
+        if (artistSplitEnabled) {
+            NSString *splitArtist = nil;
+            NSString *splitTitle = nil;
+            LFMSplitKind kind = LFMSplitArtistFromTitle(item.title, item.artist, &splitArtist, &splitTitle);
+            if (kind != LFMSplitKindNone && splitArtist.length > 0 && splitTitle.length > 0) {
+                NSLog(@"Artist/title split (%ld): %@ - %@", (long)kind, splitArtist, splitTitle);
+                item.artist = splitArtist;
+                item.title = splitTitle;
+            }
         }
 
         if (!mbEnabled || mbEmail.length == 0) {
