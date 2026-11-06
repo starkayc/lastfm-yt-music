@@ -236,15 +236,24 @@ static inline LFMSplitKind LFMSplitArtistFromTitle(NSString *title, NSString *ar
     if (prefix.length < 2 || suffix.length < 2) return LFMSplitKindNone;
     if (LFMSplitWordCount(prefix) > 6 || LFMSplitWordCount(suffix) > 12) return LFMSplitKindNone;
 
+    // "Wings (Nu:Logic Remix)": the bracketed tail is part of the title, not a reject signal.
+    NSString *suffixCore = suffix;
+    NSRegularExpression *tailRe = [NSRegularExpression regularExpressionWithPattern:@"\\s*[\\(\\[【（][^)\\]】）]*[)\\]】）]$"
+                                                                          options:0 error:nil];
+    NSTextCheckingResult *tail = [tailRe firstMatchInString:suffixCore options:0 range:NSMakeRange(0, suffixCore.length)];
+    if (tail) suffixCore = [suffixCore substringToIndex:tail.range.location];
+    suffixCore = [suffixCore stringByTrimmingCharactersInSet:ws];
+    if (suffixCore.length < 2) return LFMSplitKindNone;
+
     static NSString *const punctPrefix = @":,()[]【】（）「」*…";
     static NSString *const punctSuffix = @":()[]【】（）「」*…";
     NSCharacterSet *badPrefix = [NSCharacterSet characterSetWithCharactersInString:punctPrefix];
     NSCharacterSet *badSuffix = [NSCharacterSet characterSetWithCharactersInString:punctSuffix];
     if ([prefix rangeOfCharacterFromSet:badPrefix].location != NSNotFound) return LFMSplitKindNone;
-    if ([suffix rangeOfCharacterFromSet:badSuffix].location != NSNotFound) return LFMSplitKindNone;
-    if (LFMSplitMatches(suffix, @"\\b(19|20)\\d{2}\\b")) return LFMSplitKindNone;
-    if (LFMSplitMatches(suffix, @"^#?\\d+$")) return LFMSplitKindNone;
-    if (LFMSplitSuffixIsDescriptor(suffix)) return LFMSplitKindNone;
+    if ([suffixCore rangeOfCharacterFromSet:badSuffix].location != NSNotFound) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffixCore, @"\\b(19|20)\\d{2}\\b")) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffixCore, @"^#?\\d+$")) return LFMSplitKindNone;
+    if (LFMSplitSuffixIsDescriptor(suffixCore)) return LFMSplitKindNone;
     if (LFMSplitPrefixIsLabel(prefix)) return LFMSplitKindNone;
     if (LFMSplitMatches(prefix, @"^#?\\d+$")) return LFMSplitKindNone;
 

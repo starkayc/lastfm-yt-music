@@ -183,6 +183,8 @@ static void testArtistTitleSplit(void) {
                 @"Yot Club", @"down bad");
     assertSplit(@"XXXTentacion ft. Lil Uzi Vert - I\u2019m Not Human", @"RileyTaugor", LFMSplitKindChannel,
                 @"XXXTentacion ft. Lil Uzi Vert", @"I\u2019m Not Human");
+    assertSplit(@"Birdy - Wings (Nu:Logic Remix)", @"MrSuicideSheep", LFMSplitKindChannel,
+                @"Birdy", @"Wings (Nu:Logic Remix)");
 
     // the artist already sits in the title -> just drop the repeat
     assertSplit(@"Pinegrove - Need 2", @"Pinegrove", LFMSplitKindDedupe, @"Pinegrove", @"Need 2");
@@ -207,6 +209,8 @@ static void testArtistTitleSplit(void) {
     assertSplit(@"Ella Y Yo - Featuring Don Omar", @"Aventura", LFMSplitKindNone, nil, nil);
     assertSplit(@"Sunflower - Spider-Man: Into the Spider-Verse", @"Post Malone", LFMSplitKindNone, nil, nil);
     assertSplit(@"I'll Be Missing You - *Every Breath You Take*", @"Puff Daddy", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Ghost Assassin - VIP (Original Mix)", @"Maduk", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Somewhere Only We Know - (Live)", @"Dan Music", LFMSplitKindNone, nil, nil);
 
     // reject: prefix is a track number or a soundtrack label, not an artist
     assertSplit(@"03 - Love Sensation", @"Air Gear OST", LFMSplitKindNone, nil, nil);
