@@ -2,7 +2,7 @@ THEOS_PACKAGE_SCHEME = rootless
 ARCHS := arm64 arm64e
 TARGET := iphone:clang:latest:14.0
 INSTALL_TARGET_PROCESSES = YouTubeMusic
-PACKAGE_VERSION ?= 1.0.3
+PACKAGE_VERSION ?= 1.0.6
 
 include $(THEOS)/makefiles/common.mk
 

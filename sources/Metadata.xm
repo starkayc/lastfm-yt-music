@@ -89,7 +89,7 @@ static NSString *LFMStripTopicSuffix(NSString *artist) {
         @"\\s\\(Letra\\)",
         @"\\s\\(En\\svivo\\)",
         // yt video cruft, space tolerant
-        @"\\s*[([]\\s*(of+icial\\s*)?(music\\s*)?(video|audio)\\s*[)\\]]$",
+        @"\\s*[([]\\s*(of+icial\\s*|cdq\\s*|hq\\s*|hd\\s*|high\\s*quality\\s*)?(music\\s*)?(video|audio)\\s*[)\\]]$",
         @"\\s*[([]\\s*(of+icial\\s*)?(mv|m/v|visuali[sz]er|lyric\\s*video)s?\\s*[)\\]]$",
         @"\\s*[-–—]\\s*(of+icial\\s*)?(music\\s*)?(video|audio)\\s*$",
         @"\\s*[([]\\s*(of+icial\\s*)?(hd|hq|4k|8k|1080p|720p)\\s*(video|audio|mv|remaster(ed)?)?\\s*[)\\]]$",

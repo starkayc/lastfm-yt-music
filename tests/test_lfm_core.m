@@ -183,6 +183,13 @@ static void testArtistTitleSplit(void) {
                 @"Yot Club", @"down bad");
     assertSplit(@"XXXTentacion ft. Lil Uzi Vert - I\u2019m Not Human", @"RileyTaugor", LFMSplitKindChannel,
                 @"XXXTentacion ft. Lil Uzi Vert", @"I\u2019m Not Human");
+    assertSplit(@"Birdy - Wings (Nu:Logic Remix)", @"MrSuicideSheep", LFMSplitKindChannel,
+                @"Birdy", @"Wings (Nu:Logic Remix)");
+    assertSplit(@"ROSÉ & Bruno Mars 'APT.'", @"Jaeguchi", LFMSplitKindChannel,
+                @"ROSÉ & Bruno Mars", @"APT.");
+    assertSplit(@"Pinegrove 'Need 2'", @"Pinegrove", LFMSplitKindDedupe, @"Pinegrove", @"Need 2");
+    assertSplit(@"Girls' Generation 소녀시대 'Gee'", @"SMTOWN", LFMSplitKindChannel,
+                @"Girls' Generation 소녀시대", @"Gee");
 
     // the artist already sits in the title -> just drop the repeat
     assertSplit(@"Pinegrove - Need 2", @"Pinegrove", LFMSplitKindDedupe, @"Pinegrove", @"Need 2");
@@ -193,6 +200,25 @@ static void testArtistTitleSplit(void) {
     // "Title - Artist" order
     assertSplit(@"Need 2 - slow pinegrove", @"Pinegrove", LFMSplitKindReverse, @"Pinegrove", @"Need 2");
     assertSplit(@"Red Red Wine - Bob Marley", @"Bob Marley", LFMSplitKindReverse, @"Bob Marley", @"Red Red Wine");
+    assertSplit(@"LAGUNAS - Peso Pluma, Jasiel Nuñez", @"Peso Pluma", LFMSplitKindReverse,
+                @"Peso Pluma", @"LAGUNAS");
+
+    // reject: the uploader name sits in a remix credit at the end, so the order is not reversed
+    assertSplit(@"Porter Robinson - Get Your Wish (Sewerslvt Remix)", @"Sewerslvt", LFMSplitKindChannel,
+                @"Porter Robinson", @"Get Your Wish (Sewerslvt Remix)");
+    assertSplit(@"Meiko - Leave The Lights On (Krot Remix)", @"The", LFMSplitKindChannel,
+                @"Meiko", @"Leave The Lights On (Krot Remix)");
+    assertSplit(@"SNOW STRIPPERS - UNDER YOUR SPELL #SURFGANG", @"SURF GANG", LFMSplitKindChannel,
+                @"SNOW STRIPPERS", @"UNDER YOUR SPELL #SURFGANG");
+    assertSplit(@"Sons Of Charlie - The Enemy Between My Ears (Tiktok)", @"The Enemy Between My Ears",
+                LFMSplitKindChannel, @"Sons Of Charlie", @"The Enemy Between My Ears (Tiktok)");
+    assertSplit(@"huken x murkish - WASTED", @"Wasted", LFMSplitKindChannel,
+                @"huken x murkish", @"WASTED");
+    assertSplit(@"FLY ME TO THE MOON — CLAIRE", @"Neon Genesis Evangelion", LFMSplitKindReverse,
+                @"CLAIRE", @"FLY ME TO THE MOON");
+    assertSplit(@"SMOOTH OPERATOR - ENZO", @"NODA", LFMSplitKindReverse, @"ENZO", @"SMOOTH OPERATOR");
+    // single-word all-caps prefix is the artist, not the track
+    assertSplit(@"黒KITSXNE - Forsaken", @"#Trance", LFMSplitKindChannel, @"黒KITSXNE", @"Forsaken");
 
     // reject: suffix is a version descriptor, never an artist
     assertSplit(@"Ghost Assassin - VIP", @"Maduk", LFMSplitKindNone, nil, nil);
@@ -207,6 +233,18 @@ static void testArtistTitleSplit(void) {
     assertSplit(@"Ella Y Yo - Featuring Don Omar", @"Aventura", LFMSplitKindNone, nil, nil);
     assertSplit(@"Sunflower - Spider-Man: Into the Spider-Verse", @"Post Malone", LFMSplitKindNone, nil, nil);
     assertSplit(@"I'll Be Missing You - *Every Breath You Take*", @"Puff Daddy", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Ghost Assassin - VIP (Original Mix)", @"Maduk", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Somewhere Only We Know - (Live)", @"Dan Music", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Ghost Assassin 'VIP'", @"Maduk", LFMSplitKindNone, nil, nil);
+    // classical movement names in double quotes are not a track separator
+    assertSplit(@"Nocturne in D-Flat Major \"Un rêve\"", @"Eric Christian", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Ivan Sings \"Andantino\"", @"Aram Khachaturian", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Anything You Synthesize - Ambient", @"The American Dollar", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Full Bike Scene - Episode 4", @"Zankyou no Terror", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Untitled #9 - Smáskifa 1", @"Sigur Rós", LFMSplitKindNone, nil, nil);
+    assertSplit(@"Orphée Suite - 6. Orphee's Return", @"Philip Glass", LFMSplitKindNone, nil, nil);
+    assertSplit(@"little dark age - little dark age", @"ardared", LFMSplitKindNone, nil, nil);
+    assertSplit(@"BOOTHILL SONG - “Sinners”", @"Honkai Star Rail", LFMSplitKindNone, nil, nil);
 
     // reject: prefix is a track number or a soundtrack label, not an artist
     assertSplit(@"03 - Love Sensation", @"Air Gear OST", LFMSplitKindNone, nil, nil);

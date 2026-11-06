@@ -208,7 +208,7 @@ static inline NSUInteger LFMSplitWordCount(NSString *string) {
 
 static inline BOOL LFMSplitSuffixIsDescriptor(NSString *suffix) {
     return LFMSplitMatches(suffix,
-        @"\\b(live|remix(ed)?|version|ver|edit|mix|remaster(ed)?|acoustic|instrumental|demo|session|feat|featuring|ft|mono|stereo|extended|radio|explicit|clean|slowed|sped|cover|orchestral|a cappella|dub|bootleg|karaoke|commentary|interview|outro|intro|part|pt|video|lyric|lyrics|letra|audio|official|mv|hd|hq|4k|bonus|track|original|single|reimagined|reprise|soundtrack|unreleased|deluxe|edition|from|theme|excerpt|mashup|tapes?|vip|vocal|music|inst)\\b|\\d{4}\\s*ver\\.?");
+        @"\\b(live|remix(ed)?|version|ver|edit|mix|remaster(ed)?|acoustic|instrumental|demo|session|feat|featuring|ft|mono|stereo|extended|radio|explicit|clean|slowed|sped|cover|orchestral|a cappella|dub|bootleg|karaoke|commentary|interview|outro|intro|part|pt|video|lyric|lyrics|letra|audio|official|mv|hd|hq|4k|bonus|track|original|single|reimagined|reprise|soundtrack|unreleased|deluxe|edition|from|theme|excerpt|mashup|tapes?|vip|vocal|music|inst|rework|reinterpretation|arrangement|arr|ambient|episode)\\b|\\d{4}\\s*ver\\.?");
 }
 
 static inline BOOL LFMSplitPrefixIsLabel(NSString *prefix) {
@@ -229,41 +229,83 @@ static inline LFMSplitKind LFMSplitArtistFromTitle(NSString *title, NSString *ar
             if (sep.location != NSNotFound) break;
         }
     }
-    if (sep.location == NSNotFound) return LFMSplitKindNone;
 
-    NSString *prefix = [[t substringToIndex:sep.location] stringByTrimmingCharactersInSet:ws];
-    NSString *suffix = [[t substringFromIndex:NSMaxRange(sep)] stringByTrimmingCharactersInSet:ws];
+    NSString *prefix = nil;
+    NSString *suffix = nil;
+    if (sep.location != NSNotFound) {
+        prefix = [[t substringToIndex:sep.location] stringByTrimmingCharactersInSet:ws];
+        suffix = [[t substringFromIndex:NSMaxRange(sep)] stringByTrimmingCharactersInSet:ws];
+    } else {
+        // "ROSÉ & Bruno Mars 'APT.'": some channels quote the track instead of using a dash.
+        // Double quotes are left out on purpose: classical tracks use them for movement names.
+        NSRegularExpression *quoteRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+)\\s+['‘’](.+)['‘’]$"
+                                                                             options:0 error:nil];
+        NSTextCheckingResult *qm = [quoteRe firstMatchInString:t options:0 range:NSMakeRange(0, t.length)];
+        if (!qm) return LFMSplitKindNone;
+        prefix = [[t substringWithRange:[qm rangeAtIndex:1]] stringByTrimmingCharactersInSet:ws];
+        suffix = [[t substringWithRange:[qm rangeAtIndex:2]] stringByTrimmingCharactersInSet:ws];
+    }
     if (prefix.length < 2 || suffix.length < 2) return LFMSplitKindNone;
     if (LFMSplitWordCount(prefix) > 6 || LFMSplitWordCount(suffix) > 12) return LFMSplitKindNone;
 
+    // "Wings (Nu:Logic Remix)": the bracketed tail is part of the title, not a reject signal.
+    NSString *suffixCore = suffix;
+    NSRegularExpression *tailRe = [NSRegularExpression regularExpressionWithPattern:@"\\s*[\\(\\[【（][^)\\]】）]*[)\\]】）]$"
+                                                                          options:0 error:nil];
+    NSTextCheckingResult *tail = [tailRe firstMatchInString:suffixCore options:0 range:NSMakeRange(0, suffixCore.length)];
+    if (tail) suffixCore = [suffixCore substringToIndex:tail.range.location];
+    suffixCore = [suffixCore stringByTrimmingCharactersInSet:ws];
+    if (suffixCore.length < 2) return LFMSplitKindNone;
+
     static NSString *const punctPrefix = @":,()[]【】（）「」*…";
-    static NSString *const punctSuffix = @":()[]【】（）「」*…";
+    static NSString *const punctSuffix = @":()[]【】（）「」*…\"“”";
     NSCharacterSet *badPrefix = [NSCharacterSet characterSetWithCharactersInString:punctPrefix];
     NSCharacterSet *badSuffix = [NSCharacterSet characterSetWithCharactersInString:punctSuffix];
     if ([prefix rangeOfCharacterFromSet:badPrefix].location != NSNotFound) return LFMSplitKindNone;
-    if ([suffix rangeOfCharacterFromSet:badSuffix].location != NSNotFound) return LFMSplitKindNone;
-    if (LFMSplitMatches(suffix, @"\\b(19|20)\\d{2}\\b")) return LFMSplitKindNone;
-    if (LFMSplitMatches(suffix, @"^#?\\d+$")) return LFMSplitKindNone;
-    if (LFMSplitSuffixIsDescriptor(suffix)) return LFMSplitKindNone;
+    if ([suffixCore rangeOfCharacterFromSet:badSuffix].location != NSNotFound) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffixCore, @"\\b(19|20)\\d{2}\\b")) return LFMSplitKindNone;
+    if (LFMSplitMatches(suffixCore, @"^#?\\d+$")) return LFMSplitKindNone;
+    // "Orphée Suite - 6. Orphee's Return": a numbered movement, not an artist
+    if (LFMSplitMatches(suffixCore, @"^\\d+\\s*[.)]")) return LFMSplitKindNone;
+    if (LFMSplitSuffixIsDescriptor(suffixCore)) return LFMSplitKindNone;
     if (LFMSplitPrefixIsLabel(prefix)) return LFMSplitKindNone;
     if (LFMSplitMatches(prefix, @"^#?\\d+$")) return LFMSplitKindNone;
+    // "Untitled #9": a trailing number tags the track, not an artist
+    if (LFMSplitMatches(prefix, @"#\\d+$")) return LFMSplitKindNone;
 
     NSString *artistKey = LFMNormalizedKey(a);
     NSString *prefixKey = LFMNormalizedKey(prefix);
     NSString *suffixKey = LFMNormalizedKey(suffix);
+    if (prefixKey.length > 0 && [prefixKey isEqualToString:suffixKey]) return LFMSplitKindNone;
 
     if (artistKey.length >= 2 && [prefixKey containsString:artistKey]) {
         if (outArtist) *outArtist = a;
         if (outTitle) *outTitle = suffix;
         return LFMSplitKindDedupe;
     }
-    // "Title - Artist" order: keep the artist, drop its repeat from the end.
-    if (artistKey.length >= 3 && [suffixKey containsString:artistKey]) {
-        if (outArtist) *outArtist = a;
+    // "Title - Artist" order: keep the artist, drop its repeat from the end. Only when the artist
+    // leads the suffix, otherwise "Song - Uploader Remix" would be read backwards.
+    BOOL prefixIsArtistList = LFMSplitMatches(prefix, @"(\\s[xX]\\s|\\s&\\s|\\band\\b)");
+    if (artistKey.length >= 3 && !prefixIsArtistList) {
+        NSString *escaped = [NSRegularExpression escapedPatternForString:a];
+        NSString *artistInSuffix = [NSString stringWithFormat:
+            @"^%@\\s*([,&/]|\\bx\\b|\\bfeat\\b|\\bft\\b|\\band\\b|\\bvs\\b|\\bwith\\b)|(^|\\s)%@$",
+            escaped, escaped];
+        if ([suffixKey isEqualToString:artistKey] || LFMSplitMatches(suffix, artistInSuffix)) {
+            if (outArtist) *outArtist = a;
+            if (outTitle) *outTitle = prefix;
+            return LFMSplitKindReverse;
+        }
+    }
+    if (prefix.length < 3) return LFMSplitKindNone;
+
+    // "FLY ME TO THE MOON — CLAIRE": an all-caps track in front of a one-word artist
+    if (!prefixIsArtistList && LFMSplitWordCount(suffix) == 1 && LFMSplitWordCount(prefix) >= 2 &&
+        [prefix isEqualToString:prefix.uppercaseString]) {
+        if (outArtist) *outArtist = suffix;
         if (outTitle) *outTitle = prefix;
         return LFMSplitKindReverse;
     }
-    if (prefix.length < 3) return LFMSplitKindNone;
 
     if (outArtist) *outArtist = prefix;
     if (outTitle) *outTitle = suffix;
